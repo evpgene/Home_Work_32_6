@@ -3,143 +3,147 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
 
-// some changes
-// some other changes
 
-using DB_address = std::string;
-using DB_name = std::string;
 using no_errors = bool; // true - is no errors
 
-struct DB_ConnectionParameters
-{
-	DB_address address{ std::to_string(5011) };
-	DB_name name{ " Connection Name" };
-};
-
-struct DB_Query
+// создаём тип(а) запрос
+struct DBQuery
 {
 	const char* data{ "query_to_database" };
 	int consistency_check_marker{ false };
 };
 
-struct DB_Responce
+// создаём тип(а) ответ
+struct DBResponce
 {
-	friend bool operator== (const DB_Responce& responce1, const DB_Responce& responce2) {
+	friend bool operator== (const DBResponce& responce1, const DBResponce& responce2) {
 		return responce2.data == responce1.data && responce2.consistency_check_marker == responce1.consistency_check_marker;
 	}
-
-	int data{ 111 };
-	int consistency_check_marker{ false };
+	int data{ 111 }; // просто, чтобы вернул что-нибудь (но неожиданный)
+	int consistency_check_marker{ false }; // просто, чтобы вернул что-нибудь (но неожиданный)
 };
 
-
+// прописываем интерфейс
 class DBConnectionInterface
 {
 public:
-	DBConnectionInterface() {  };
-	virtual ~DBConnectionInterface() {  };
-	virtual no_errors open_con()  =0;
-	virtual no_errors close_con() =0;
-	virtual DB_Responce execQuery(DB_Query query) =0;
-
-
-public:
-	DB_ConnectionParameters param;
-
+	DBConnectionInterface() {};
+	virtual ~DBConnectionInterface() {}; // важно фигурные скобки !!!
+    virtual no_errors open() =0;
+    virtual no_errors close() = 0;
+    virtual DBResponce execQuery(const DBQuery& query) = 0;
+private:
 };
 
-//создаем класс мок-объекта обмена
-class DBConnection_Mock : public DBConnectionInterface
+// коннекция на базе интерфейса
+class DBConnection : public DBConnectionInterface
 {
 public:
-	MOCK_METHOD(no_errors, open_con, (), (override));
-	MOCK_METHOD(no_errors, close_con, (), (override));
-	MOCK_METHOD(DB_Responce, execQuery, (DB_Query query), (override));
+    ~DBConnection() override {} ; // важно фигурные скобки !!!
+	virtual no_errors open() override { return no_errors(false); };
+    virtual no_errors close() override { return no_errors(false); };
+    virtual DBResponce execQuery(const DBQuery& query) override { return queryToResponce(query); };
 
 private:
-
+    		DBResponce queryToResponce(const DBQuery& query) {
+			DBResponce responce;
+			responce.consistency_check_marker = query.consistency_check_marker + 1;
+			responce.data = 0xFFFF;
+			return responce;
+		};
 };
 
-
-class ClassThatUsesDB : public DBConnectionInterface
+// макет коннекции на базе интерфейса
+class DBConnectionMock : public DBConnectionInterface
 {
 public:
-	no_errors open_con() override { return true; };
-	no_errors close_con() override { return true; };
-	DB_Responce execQuery(DB_Query query) override { 
-		open_con();
-		DB_Responce responce = queryToResponce(query);
-		close_con();
-		return responce; };
-
-	DB_Responce queryToResponce(DB_Query query) {
-		DB_Responce responce;
-		responce.consistency_check_marker = query.consistency_check_marker + 1;
-		responce.data = 0xFFFF;
-		return responce;
-	};
-
+    ~DBConnectionMock() override {} ;
+    MOCK_METHOD(no_errors, open, (), (override)) {}; // важно фигурные скобки !!!
+    MOCK_METHOD(no_errors, close, (), (override)) {}; // важно фигурные скобки !!!
+    MOCK_METHOD(DBResponce, execQuery, (const DBQuery&), (override)) {}; // важно фигурные скобки !!!
+private:
 };
 
+// класс, который "в действительности" использует подключение к базе
+class ClassThatUsesDB {
+public:
+    DBResponce makeQuery(DBConnectionInterface* dBConnection, const DBQuery& query) {
+        openConnection(dBConnection);
+        DBResponce responce = useConnection(dBConnection, query);
+        closeConnection(dBConnection);
+        return DBResponce(responce);
+    }
+private:
+    no_errors openConnection(DBConnectionInterface* dBConnection) { dBConnection->open(); return no_errors(true); }
+    no_errors closeConnection(DBConnectionInterface* dBConnection) { dBConnection->close(); return no_errors(true); }
+    DBResponce useConnection(DBConnectionInterface* dBConnection, const DBQuery& query) { return dBConnection->execQuery(query); }
+};
 
-
-
-
-//создаем фикстуру и тирдаун для наших тестов «на всякий случай»
-class ClassThatUsesDB_TestSuite : public ::testing::Test {
+//создаем оболочку для тестов
+class TestSuite : public ::testing::Test
+{
 protected:
-	void SetUp() {
-		dBConnection = new ClassThatUsesDB();
-	}
-	void TearDown() {
-		delete dBConnection;
-	}
-	DBConnectionInterface* dBConnection;
+    void SetUp()
+    {
+        usesDB = new ClassThatUsesDB();
+    }
+
+    void TearDown()
+    {
+        delete usesDB;
+    }
+
+protected:
+    ClassThatUsesDB* usesDB;
 };
 
-//
-//
-//
-//
-//
-//
-TEST_F(ClassThatUsesDB_TestSuite, testcase2)
+
+// подключаем пространства имён
+using ::testing::Expectation;
+using ::testing::Return;
+using ::testing::AtLeast;
+
+//тест на правильность выполнения метода преобразования команды в массив байт
+TEST_F(TestSuite, testQuery)
 {
-	DB_Query query;
-	DB_Responce responce;
-	DB_Responce expected_responce;
-	expected_responce.consistency_check_marker = query.consistency_check_marker + 1;
-	expected_responce.data = 0xFFFF;
-	DBConnection_Mock dBConnection_Mock;
+    //для целей теста формируем запрос и ожидаемый результат
+    DBQuery query;
+    DBResponce expected_responce;
+    expected_responce.consistency_check_marker = query.consistency_check_marker + 1;
+    expected_responce.data = 0xFFFF;
 
+    // создаём "реальный" коннект
+    DBConnection dBConnection;
 
-	dBConnection_Mock.execQuery(query);
-	EXPECT_CALL(dBConnection_Mock, open_con).WillOnce(::testing::Return(true));
-	EXPECT_CALL(dBConnection_Mock, execQuery).WillRepeatedly(::testing::Return(responce));
-	EXPECT_CALL(dBConnection_Mock, close_con).WillOnce(::testing::Return(true));
-
-	DB_Responce exec_responce = dBConnection->execQuery(query);
-
-	//сравниваем полученный результат с референсом
-	//ASSERT_EQ(exec_responce, expected_responce);
+    // проверяем makeQuery(),
+    // остальные методы приватные, поэтому тест для них не вызвать
+    // проверяем, что действительно возвращаемый результат соответствует ожиданиям
+    DBResponce executed_responce = usesDB->makeQuery(&dBConnection, query);
+    EXPECT_EQ(executed_responce, expected_responce);
 }
 
 
-TEST_F(ClassThatUsesDB_TestSuite, testcase3)
+TEST_F(TestSuite, testSequence)
 {
-	DB_ConnectionParameters param;
-	no_errors open_result = true; //dBConnection->close_con(param);
-	no_errors  check_result{ true };
-	//ASSERT_EQ(check_result, open_result);
+    DBConnectionMock dBConnectionMock;
+    DBQuery query;
+    DBResponce responce;
+
+    Expectation open = EXPECT_CALL(dBConnectionMock, open)
+        .WillOnce(Return(no_errors(true))
+        );
+
+	Expectation execQuery = EXPECT_CALL(dBConnectionMock, execQuery)
+		.Times(AtLeast(1))
+		.After(open)
+		.WillRepeatedly(Return(DBResponce(responce))
+		);
+
+	Expectation close = EXPECT_CALL(dBConnectionMock, close)
+		.WillOnce(Return(no_errors(true)));
+
+    usesDB->makeQuery(&dBConnectionMock, query);
 }
-
-//
-
-
-
-
-
-// короче тут надо создать три теста для каждой из функций 
 
 
 int main(int argc, char* argv[])
